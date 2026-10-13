@@ -1,7 +1,11 @@
 """Main window: sidebar navigation with the Add Songs and Player pages."""
 
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QButtonGroup,
+    QCheckBox,
+    QColorDialog,
     QComboBox,
     QHBoxLayout,
     QInputDialog,
@@ -23,6 +27,7 @@ from PySide6.QtWidgets import (
 import newsongs
 import playlists
 import settings
+from gui import theme
 from gui.workers import SearchWorker, TitleWorker
 
 try:
@@ -53,6 +58,51 @@ def _set_status(label, text, state="info"):
     # Re-apply the stylesheet so the [state=...] selector takes effect.
     label.style().unpolish(label)
     label.style().polish(label)
+
+
+class SeekSlider(QSlider):
+    """A horizontal slider that seeks to wherever it is clicked or dragged."""
+
+    def __init__(self, parent=None):
+        super().__init__(Qt.Horizontal, parent)
+        self.setTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def _value_at(self, x):
+        width = self.width()
+
+        if width <= 0:
+            return self.value()
+
+        ratio = min(max(x / width, 0.0), 1.0)
+
+        return int(round(self.minimum() + ratio * (self.maximum() - self.minimum())))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.setSliderDown(True)
+            self.setValue(self._value_at(event.position().x()))
+            event.accept()
+            return
+
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.isSliderDown():
+            self.setValue(self._value_at(event.position().x()))
+            event.accept()
+            return
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.isSliderDown():
+            self.setValue(self._value_at(event.position().x()))
+            self.setSliderDown(False)
+            event.accept()
+            return
+
+        super().mouseReleaseEvent(event)
 
 
 class AddSongPage(QWidget):
@@ -293,6 +343,7 @@ class PlayerPage(QWidget):
         self._items = []
         self._title_worker = None
         self._attempted_titles = set()
+        self._last_duration = 0.0
 
         root = QVBoxLayout(self)
         root.setContentsMargins(32, 28, 32, 28)
@@ -327,9 +378,11 @@ class PlayerPage(QWidget):
         self.duration = QLabel("00:00")
         self.duration.setObjectName("TimeLabel")
 
-        self.progress = QProgressBar()
+        self.progress = SeekSlider()
+        self.progress.setObjectName("SeekBar")
         self.progress.setRange(0, 1000)
         self.progress.setValue(0)
+        self.progress.valueChanged.connect(self._on_progress_changed)
 
         progress_row.addWidget(self.elapsed)
         progress_row.addWidget(self.progress, 1)
@@ -369,6 +422,32 @@ class PlayerPage(QWidget):
         controls.addStretch(1)
 
         root.addLayout(controls)
+
+        # ---- play modes (shuffle / loop) --------------------------------
+        modes_row = QHBoxLayout()
+        modes_row.setSpacing(10)
+
+        self.shuffle_btn = QPushButton("\U0001f500  Shuffle")
+        self.shuffle_btn.setObjectName("ModeToggle")
+        self.shuffle_btn.setCheckable(True)
+        self.shuffle_btn.setToolTip("Shuffle the playlist")
+        self.shuffle_btn.toggled.connect(self._toggle_shuffle)
+
+        loop_icon = QLabel("\U0001f501")
+
+        self.loop_combo = QComboBox()
+        self.loop_combo.setObjectName("PlaylistCombo")
+        self.loop_combo.addItems(["Loop: Off", "Loop: All", "Loop: One"])
+        self.loop_combo.setToolTip("Off (no repeat), All (repeat playlist) or One (repeat track)")
+        self.loop_combo.currentIndexChanged.connect(self._change_loop)
+
+        modes_row.addStretch(1)
+        modes_row.addWidget(self.shuffle_btn)
+        modes_row.addWidget(loop_icon)
+        modes_row.addWidget(self.loop_combo)
+        modes_row.addStretch(1)
+
+        root.addLayout(modes_row)
 
         # ---- volume -----------------------------------------------------
         volume_row = QHBoxLayout()
@@ -422,6 +501,8 @@ class PlayerPage(QWidget):
                 self.stop_btn,
                 play_btn,
                 self.volume,
+                self.shuffle_btn,
+                self.loop_combo,
             ):
                 widget.setEnabled(False)
 
@@ -635,6 +716,47 @@ class PlayerPage(QWidget):
         except Exception:
             pass
 
+    def _toggle_shuffle(self, checked):
+        if self.playback is None:
+            return
+
+        try:
+            self.playback.set_shuffle(checked)
+
+        except Exception as exc:
+            _set_status(self.now_label, f"Playback error: {exc}", "error")
+
+    def _change_loop(self, index):
+        if self.playback is None:
+            return
+
+        mode = ("off", "all", "one")[max(0, min(2, index))]
+
+        try:
+            self.playback.set_loop_mode(mode)
+
+        except Exception as exc:
+            _set_status(self.now_label, f"Playback error: {exc}", "error")
+
+    def _seek(self, value):
+        if self.playback is None or not self._last_duration:
+            return
+
+        seconds = self._last_duration * value / 1000.0
+        self.elapsed.setText(_fmt_time(seconds))
+
+        try:
+            self.playback.seek(seconds)
+
+        except Exception:
+            pass
+
+    def _on_progress_changed(self, value):
+        # Only seek for user-driven changes (drag/click), not the timer's
+        # programmatic updates.
+        if self.progress.isSliderDown():
+            self._seek(value)
+
     # ------------------------------------------------------------------ #
     # Polling MPV state
     # ------------------------------------------------------------------ #
@@ -653,10 +775,14 @@ class PlayerPage(QWidget):
             playlist_pos = player.playlist_pos
             idle = bool(player.core_idle)
             has_file = bool(player.path)
+            shuffle = self.playback.is_shuffle()
+            loop_mode = self.playback.get_loop_mode()
         except Exception:
             return
 
         buffering = has_file and idle and not paused and not duration
+
+        self._last_duration = float(duration) if duration else 0.0
 
         if buffering:
             self.now_label.setText("Buffering...")
@@ -679,12 +805,24 @@ class PlayerPage(QWidget):
         self.elapsed.setText(_fmt_time(position))
         self.duration.setText(_fmt_time(duration))
 
-        if duration and position is not None and duration > 0:
-            self.progress.setValue(int(position / duration * 1000))
-        else:
-            self.progress.setValue(0)
+        # Don't fight the user while they are dragging the seek bar.
+        if not self.progress.isSliderDown():
+            if duration and position is not None and duration > 0:
+                self.progress.setValue(int(position / duration * 1000))
+            else:
+                self.progress.setValue(0)
 
         self.play_btn.setText("\u23f8" if (paused and duration) else "\u25b6")
+
+        self.shuffle_btn.blockSignals(True)
+        self.shuffle_btn.setChecked(shuffle)
+        self.shuffle_btn.blockSignals(False)
+
+        loop_index = {"off": 0, "all": 1, "one": 2}.get(loop_mode, 0)
+
+        self.loop_combo.blockSignals(True)
+        self.loop_combo.setCurrentIndex(loop_index)
+        self.loop_combo.blockSignals(False)
 
     def stop_timer(self):
         self.timer.stop()
@@ -710,13 +848,64 @@ class SettingsPage(QWidget):
         title = QLabel("Settings")
         title.setObjectName("PageTitle")
 
-        subtitle = QLabel("Connect EchoYT to your own Discord profile.")
+        subtitle = QLabel("Personalize EchoYT and connect it to Discord.")
         subtitle.setObjectName("PageSubtitle")
 
         root.addWidget(title)
         root.addWidget(subtitle)
         root.addSpacing(6)
 
+        # ---- appearance -------------------------------------------------
+        current_accent, current_glass = settings.read_appearance()
+        self._current_accent = current_accent
+
+        appearance_label = QLabel("ACCENT COLOR")
+        appearance_label.setObjectName("SectionLabel")
+
+        swatch_row = QHBoxLayout()
+        swatch_row.setSpacing(8)
+
+        self._swatch_group = QButtonGroup(self)
+        self._swatch_group.setExclusive(True)
+
+        for name, color in theme.ACCENTS.items():
+            btn = QPushButton()
+            btn.setCheckable(True)
+            btn.setFixedSize(30, 30)
+            btn.setToolTip(name)
+            btn.setProperty("accent", color)
+            btn.setChecked(color.lower() == current_accent.lower())
+            btn.setStyleSheet(
+                "QPushButton {"
+                f"background-color: {color};"
+                "border-radius: 15px;"
+                "border: 2px solid transparent;"
+                "padding: 0;"
+                "}"
+                "QPushButton:hover { border: 2px solid #ffffff; }"
+                "QPushButton:checked { border: 3px solid #ffffff; }"
+            )
+            btn.clicked.connect(lambda _=False, c=color: self._set_accent(c))
+            self._swatch_group.addButton(btn)
+            swatch_row.addWidget(btn)
+
+        custom_btn = QPushButton("Custom\u2026")
+        custom_btn.setObjectName("SidebarButton")
+        custom_btn.setToolTip("Pick any custom accent color")
+        custom_btn.clicked.connect(self._pick_custom_accent)
+        swatch_row.addWidget(custom_btn)
+        swatch_row.addStretch(1)
+
+        self.glass_check = QCheckBox("Glassy panels (translucent, colorful)")
+        self.glass_check.setChecked(current_glass)
+        self.glass_check.stateChanged.connect(self._toggle_glass)
+
+        root.addWidget(appearance_label)
+        root.addLayout(swatch_row)
+        root.addWidget(self.glass_check)
+        root.addSpacing(12)
+
+        # ---- discord ----------------------------------------------------
         info = QLabel(settings.DEFAULT_DISCORD_INSTRUCTIONS)
         info.setObjectName("SettingsInfo")
         info.setWordWrap(True)
@@ -744,6 +933,35 @@ class SettingsPage(QWidget):
         root.addStretch(1)
 
         self.load_current()
+
+    # ---- appearance handlers ----------------------------------------
+
+    def _set_accent(self, color):
+        self._current_accent = color
+        self._sync_swatches(color)
+        self._apply_appearance()
+
+    def _pick_custom_accent(self):
+        color = QColorDialog.getColor(
+            QColor(self._current_accent), self, "Pick an accent color"
+        )
+
+        if color.isValid():
+            self._set_accent(color.name())
+
+    def _toggle_glass(self, _state):
+        self._apply_appearance()
+
+    def _apply_appearance(self):
+        glass = self.glass_check.isChecked()
+        settings.save_appearance(self._current_accent, glass)
+        theme.set_appearance(accent=self._current_accent, glass=glass)
+
+    def _sync_swatches(self, color):
+        for btn in self._swatch_group.buttons():
+            btn.setChecked(
+                str(btn.property("accent")).lower() == color.lower()
+            )
 
     def load_current(self):
         current = settings.read_discord_app_id()

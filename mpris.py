@@ -231,6 +231,18 @@ class MprisService:
 
         self._queue("Metadata", ("a{sv}", metadata))
 
+    def update_loop_status(self, status):
+        with self._lock:
+            self._loop = status
+
+        self._queue("LoopStatus", ("s", status))
+
+    def update_shuffle(self, enabled):
+        with self._lock:
+            self._shuffle = bool(enabled)
+
+        self._queue("Shuffle", ("b", bool(enabled)))
+
     def notify_seeked(self, position_us):
         self._send_signal(
             IFACE_PLAYER,
@@ -238,6 +250,24 @@ class MprisService:
             "x",
             (int(position_us),),
         )
+
+    def _current_loop_status(self):
+        try:
+            return {"one": "Track", "all": "Playlist"}.get(
+                _live().get_loop_mode(), "None"
+            )
+
+        except Exception:
+            with self._lock:
+                return self._loop
+
+    def _current_shuffle(self):
+        try:
+            return bool(_live().is_shuffle())
+
+        except Exception:
+            with self._lock:
+                return self._shuffle
 
     def _queue(self, prop, typed_value):
         with self._pending_lock:
@@ -376,15 +406,13 @@ class MprisService:
             with self._lock:
                 metadata = dict(self._metadata)
                 volume = self._volume
-                loop = self._loop
-                shuffle = self._shuffle
                 rate = self._rate
 
             return {
                 "PlaybackStatus": ("s", self._status()),
-                "LoopStatus": ("s", loop),
+                "LoopStatus": ("s", self._current_loop_status()),
                 "Rate": ("d", rate),
-                "Shuffle": ("b", shuffle),
+                "Shuffle": ("b", self._current_shuffle()),
                 "Metadata": ("a{sv}", metadata),
                 "Volume": ("d", volume),
                 "Position": ("x", self._position()),
@@ -450,16 +478,34 @@ class MprisService:
             self._queue("Volume", ("d", vol))
 
         elif prop == "LoopStatus" and sig == "s":
-            with self._lock:
-                self._loop = raw
+            status = raw if raw in ("None", "Track", "Playlist") else "None"
 
-            self._queue("LoopStatus", ("s", raw))
+            with self._lock:
+                self._loop = status
+
+            try:
+                _live().set_loop_mode(
+                    {"Track": "one", "Playlist": "all"}.get(status, "off")
+                )
+
+            except Exception:
+                pass
+
+            self._queue("LoopStatus", ("s", status))
 
         elif prop == "Shuffle" and sig == "b":
-            with self._lock:
-                self._shuffle = bool(raw)
+            enabled = bool(raw)
 
-            self._queue("Shuffle", ("b", bool(raw)))
+            with self._lock:
+                self._shuffle = enabled
+
+            try:
+                _live().set_shuffle(enabled)
+
+            except Exception:
+                pass
+
+            self._queue("Shuffle", ("b", enabled))
 
         elif prop == "Rate" and sig == "d":
             with self._lock:

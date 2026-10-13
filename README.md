@@ -8,6 +8,18 @@ No YouTube API key required — search is powered by `yt-dlp`.
 
 ---
 
+## Download
+
+Prebuilt standalone builds are published on the
+[**Releases**](https://github.com/Drfox119/EchoYT-Player/releases) page:
+
+* **Windows** — `EchoYT-windows-x86_64.zip` (unzip and run `EchoYT.exe`).
+* **Linux** — `EchoYT-linux-x86_64.tar.gz` (extract and run `./EchoYT`).
+
+No Python installation is needed for the prebuilt builds.
+
+---
+
 ## Features
 
 * **Modern PySide6 GUI** — dark theme, sidebar navigation, responsive layout.
@@ -87,16 +99,46 @@ loading that into the Qt process crashes, so it is intentionally avoided.
 
 ---
 
+## Build a standalone app
+
+You can build a self-contained executable with
+[PyInstaller](https://pyinstaller.org):
+
+```bash
+pip install -r requirements-build.txt
+pyinstaller --noconfirm --clean echoyt.spec
+```
+
+The result is `dist/EchoYT/` (a folder build). Run `EchoYT`/`EchoYT.exe`.
+
+* **Windows** — put `libmpv-2.dll` next to `echoyt.spec` before building so it
+  gets bundled (the `packaging/get_libmpv.py` helper downloads one). It is
+  shipped in the Windows release.
+* **Linux** — the app uses your system `libmpv`, so install `mpv`/`libmpv`
+  (e.g. `sudo apt install libmpv2`).
+
+Pushing a tag like `v1.0.0` triggers [`.github/workflows/release.yml`], which
+builds both platforms and publishes them to the Releases page.
+
+> In a built app, playlists and the Discord App ID are stored per-user
+> (`%APPDATA%\EchoYT` on Windows, `~/.local/share/EchoYT` on Linux) so they
+> survive upgrades. Running from source keeps using the project folder.
+
+---
+
 ## Project layout
 
 ```
 Main.py        CLI entry point
+echoyt.py      GUI entry point for builds (wraps `python -m gui`)
+echoyt.spec    PyInstaller build spec
 newsongs.py    YouTube search (yt-dlp) and adding tracks
 playback.py    mpv player + Discord Rich Presence + MPRIS hookup
 mpris.py       pure-Python MPRIS D-Bus service (Linux desktop integration)
 playlists.py   named playlist storage (create / remove / dedupe)
 settings.py    local user settings (Discord App ID)
 config.py      paths and constants
+packaging/     build helpers (Windows libmpv downloader)
 gui/           PySide6 desktop interface
   theme.py       dark theme / stylesheet
   workers.py     background threads (search, title lookup)

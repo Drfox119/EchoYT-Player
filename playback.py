@@ -1,5 +1,30 @@
+import asyncio
+import os
+import random
 import re
+import sys
 import threading
+import time
+
+# On Windows, python-mpv loads libmpv from %PATH% (or next to mpv.py). In a
+# frozen build the DLL sits in the bundle directory, so make sure that
+# directory is searched *before* importing mpv.
+if os.name == "nt":
+    _dll_dirs = [os.path.dirname(os.path.abspath(__file__))]
+
+    _meipass = getattr(sys, "_MEIPASS", None)
+
+    if _meipass:
+        _dll_dirs.insert(0, _meipass)
+
+    for _dll_dir in _dll_dirs:
+        try:
+            os.add_dll_directory(_dll_dir)
+
+        except Exception:
+            pass
+
+        os.environ["PATH"] = _dll_dir + os.pathsep + os.environ.get("PATH", "")
 
 import mpv
 from pypresence import Presence
@@ -39,7 +64,7 @@ RPC = None
 discord_connected = False
 
 
-def connect_discord(app_id=None, timeout=3.0):
+def connect_discord(app_id=None, timeout=5.0):
     """Connect Discord Rich Presence using the saved (or given) App ID.
 
     Returns True on success. If no App ID is available yet, returns False
@@ -47,7 +72,9 @@ def connect_discord(app_id=None, timeout=3.0):
 
     ``Presence.connect()`` can block forever when Discord's IPC socket accepts
     the connection but never answers (e.g. a second instance, or Discord stuck
-    mid-restart), so the attempt is bounded by ``timeout`` seconds.
+    mid-restart), so the attempt is bounded by ``timeout`` seconds. It also
+    must run in a thread that has its own event loop, otherwise pypresence
+    deadlocks.
     """
 
     global RPC, discord_connected
@@ -58,35 +85,33 @@ def connect_discord(app_id=None, timeout=3.0):
         discord_connected = False
         return False
 
-    presence = None
     result = {}
 
+    def _attempt():
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            presence = Presence(app_id)
+            presence.connect()
+
+            result["presence"] = presence
+
+        except Exception as e:
+            result["error"] = e
+
     try:
-        presence = Presence(app_id)
-
-        def _attempt():
-            try:
-                presence.connect()
-                result["ok"] = True
-
-            except Exception as e:
-                result["error"] = e
-
         worker = threading.Thread(target=_attempt, daemon=True)
         worker.start()
         worker.join(timeout)
 
-        if result.get("ok"):
+        presence = result.get("presence")
+
+        if presence is not None:
             RPC = presence
             discord_connected = True
             print("Discord Rich Presence connected!")
             return True
-
-        try:
-            presence.close()
-
-        except Exception:
-            pass
 
         RPC = None
         discord_connected = False
@@ -327,6 +352,14 @@ def play_playlist(playlist=None):
     for link in urls:
         player.playlist_append(link)
 
+    _wait_playlist_count(len(urls))
+
+    global _natural_order
+    _natural_order = [entry["id"] for entry in _playlist_entries()]
+
+    if _shuffle_on:
+        _shuffle_now(keep_current=False)
+
     player.playlist_pos = 0
     player.pause = False
 
@@ -356,11 +389,196 @@ def prev_track():
     player.command("playlist-prev", "weak")
 
 
+# ============================================================
+# SHUFFLE / LOOP
+# ============================================================
+
+LOOP_MODES = ("off", "all", "one")
+
+# mpv only applies its own "shuffle" option when a playlist is loaded, so toggling
+# it mid-playback does nothing. Instead we reorder the live playlist ourselves
+# with playlist-move commands.
+_shuffle_on = False
+_natural_order = []  # playlist entry ids in the order the playlist was loaded
+
+
+def _playlist_entries():
+    try:
+        return list(player.playlist)
+
+    except Exception:
+        return []
+
+
+def _wait_playlist_count(count, timeout=1.0):
+    """Wait until mpv reports ``count`` playlist entries (best effort)."""
+
+    deadline = time.monotonic() + timeout
+
+    while time.monotonic() < deadline:
+        try:
+            if player.playlist_count >= count:
+                return
+
+        except Exception:
+            pass
+
+        time.sleep(0.01)
+
+
+def _reorder_to(target_ids):
+    """Realize ``target_ids`` by moving playlist entries into place."""
+
+    for target_index, entry_id in enumerate(target_ids):
+        index = None
+
+        for i, entry in enumerate(_playlist_entries()):
+            if entry.get("id") == entry_id:
+                index = i
+                break
+
+        if index is None or index == target_index:
+            continue
+
+        player.command("playlist-move", str(index), str(target_index))
+
+
+def _shuffle_now(keep_current=True):
+    """Randomize the playlist order, optionally keeping the playing track first."""
+
+    entries = _playlist_entries()
+
+    if len(entries) < 2:
+        return
+
+    ids = [entry["id"] for entry in entries]
+
+    if keep_current:
+        pos = player.playlist_pos
+        current = None
+
+        if pos is not None and 0 <= pos < len(entries):
+            current = entries[pos]["id"]
+
+        rest = [i for i in ids if i != current]
+        random.shuffle(rest)
+        target = ([current] if current is not None else []) + rest
+
+    else:
+        random.shuffle(ids)
+        target = ids
+
+    _reorder_to(target)
+
+
+def _restore_natural_order():
+    entries = _playlist_entries()
+
+    if not _natural_order:
+        return
+
+    if {entry.get("id") for entry in entries} == set(_natural_order):
+        _reorder_to(_natural_order)
+
+
+def set_shuffle(enabled):
+    """Turn playlist shuffle on or off. Returns the new state."""
+
+    global _shuffle_on
+
+    enabled = bool(enabled)
+    _shuffle_on = enabled
+
+    if enabled:
+        _shuffle_now(keep_current=True)
+
+    else:
+        _restore_natural_order()
+
+    if mpris_service is not None:
+        mpris_service.update_shuffle(enabled)
+
+    return enabled
+
+
+def is_shuffle():
+    return _shuffle_on
+
+
+def set_loop_mode(mode):
+    """Set the loop mode: ``off``, ``all`` (playlist) or ``one`` (track)."""
+
+    mode = (mode or "off").lower()
+
+    if mode not in LOOP_MODES:
+        mode = "off"
+
+    if mode == "all":
+        player.loop_playlist = "inf"
+        player.loop_file = "no"
+
+    elif mode == "one":
+        player.loop_playlist = "no"
+        player.loop_file = "inf"
+
+    else:
+        player.loop_playlist = "no"
+        player.loop_file = "no"
+
+    if mpris_service is not None:
+        mpris_service.update_loop_status(_mpris_loop_status())
+
+    return mode
+
+
+def get_loop_mode():
+    """Return the current loop mode: ``off``, ``all`` or ``one``."""
+
+    try:
+        playlist_loop = player.loop_playlist
+        file_loop = player.loop_file
+
+    except Exception:
+        return "off"
+
+    if file_loop in ("inf", "force"):
+        return "one"
+
+    if playlist_loop in ("inf", "force"):
+        return "all"
+
+    return "off"
+
+
+def _mpris_loop_status():
+    return {"one": "Track", "all": "Playlist"}.get(get_loop_mode(), "None")
+
+
 def stop_playback():
     player.command("stop")
 
     if mpris_service is not None:
         mpris_service.update_playback_status("Stopped")
+
+
+def seek(seconds):
+    """Seek to an absolute position (in seconds) of the current track."""
+
+    try:
+        seconds = max(0.0, float(seconds))
+        player.command("seek", str(seconds), "absolute")
+
+    except Exception:
+        return False
+
+    if mpris_service is not None:
+        try:
+            mpris_service.notify_seeked(int(seconds * 1_000_000))
+
+        except Exception:
+            pass
+
+    return True
 
 
 def shutdown():
