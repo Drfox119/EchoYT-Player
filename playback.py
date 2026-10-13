@@ -1,10 +1,16 @@
 import re
+import threading
 
 import mpv
 from pypresence import Presence
 
 import playlists
 import settings
+
+try:
+    import mpris as _mpris
+except Exception:
+    _mpris = None
 
 YOUTUBE_ID_RE = re.compile(
     r"(?:v=|youtu\.be/|/shorts/|/embed/)([A-Za-z0-9_-]{11})"
@@ -33,11 +39,15 @@ RPC = None
 discord_connected = False
 
 
-def connect_discord(app_id=None):
+def connect_discord(app_id=None, timeout=3.0):
     """Connect Discord Rich Presence using the saved (or given) App ID.
 
     Returns True on success. If no App ID is available yet, returns False
     quietly so the app keeps working without Discord.
+
+    ``Presence.connect()`` can block forever when Discord's IPC socket accepts
+    the connection but never answers (e.g. a second instance, or Discord stuck
+    mid-restart), so the attempt is bounded by ``timeout`` seconds.
     """
 
     global RPC, discord_connected
@@ -48,12 +58,46 @@ def connect_discord(app_id=None):
         discord_connected = False
         return False
 
+    presence = None
+    result = {}
+
     try:
-        RPC = Presence(app_id)
-        RPC.connect()
-        discord_connected = True
-        print("Discord Rich Presence connected!")
-        return True
+        presence = Presence(app_id)
+
+        def _attempt():
+            try:
+                presence.connect()
+                result["ok"] = True
+
+            except Exception as e:
+                result["error"] = e
+
+        worker = threading.Thread(target=_attempt, daemon=True)
+        worker.start()
+        worker.join(timeout)
+
+        if result.get("ok"):
+            RPC = presence
+            discord_connected = True
+            print("Discord Rich Presence connected!")
+            return True
+
+        try:
+            presence.close()
+
+        except Exception:
+            pass
+
+        RPC = None
+        discord_connected = False
+
+        if "error" in result:
+            print(f"Discord Rich Presence unavailable: {result['error']}")
+
+        elif worker.is_alive():
+            print("Discord Rich Presence timed out; continuing without it.")
+
+        return False
 
     except Exception as e:
         RPC = None
@@ -128,6 +172,90 @@ player = mpv.MPV(
 
 
 # ============================================================
+# MPRIS (desktop media integration)
+# ============================================================
+#
+# A pure-Python MPRIS service lets the desktop (media keys, "now playing"
+# widgets, playerctl) see and control playback. The native mpv-mpris plugin
+# cannot be used here because loading it into this Qt process crashes.
+
+mpris_service = None
+
+if _mpris is not None:
+
+    try:
+        mpris_service = _mpris.MprisService()
+        mpris_service.start()
+
+    except Exception as e:
+        mpris_service = None
+        print(f"MPRIS unavailable: {e}")
+
+
+def _mpris_status():
+
+    try:
+        if getattr(player, "path", None) in (None, ""):
+            return "Stopped"
+
+        return "Paused" if player.pause else "Playing"
+
+    except Exception:
+        return "Stopped"
+
+
+def _mpris_metadata(title, path):
+
+    key = path or title or "unknown"
+    safe = re.sub(r"[^A-Za-z0-9_]", "_", str(key))
+
+    if not safe or safe[0].isdigit():
+        safe = "t_" + safe
+
+    metadata = {
+        "mpris:trackid": ("o", f"{_mpris.TRACK_PATH_BASE}{safe}"),
+    }
+
+    if title:
+        metadata["xesam:title"] = ("s", title)
+
+    if path:
+        metadata["xesam:url"] = ("s", path)
+
+    thumbnail = _thumbnail_for_path(path)
+
+    if thumbnail:
+        metadata["mpris:artUrl"] = ("s", thumbnail)
+
+    try:
+        duration = player.duration
+
+        if duration:
+            metadata["mpris:length"] = ("x", int(duration * 1_000_000))
+
+    except Exception:
+        pass
+
+    return metadata
+
+
+def _update_mpris(title=None, path=None):
+
+    if mpris_service is None:
+        return
+
+    title = player.media_title if title is None else title
+    path = player.path if path is None else path
+
+    try:
+        mpris_service.update_metadata(_mpris_metadata(title, path))
+        mpris_service.update_playback_status(_mpris_status())
+
+    except Exception:
+        pass
+
+
+# ============================================================
 # WATCH MPV TITLE
 # ============================================================
 
@@ -139,6 +267,24 @@ def media_title_changed(name, value):
         print(f"\nNow playing: {value}")
 
         update_discord(value)
+
+    _update_mpris(value, player.path)
+
+
+@player.property_observer("pause")
+def pause_changed(name, value):
+
+    if mpris_service is not None:
+        mpris_service.update_playback_status(_mpris_status())
+
+
+@player.property_observer("duration")
+def duration_changed(name, value):
+
+    # Duration is unknown when the title first changes; refresh metadata once
+    # it is available so MPRIS clients get mpris:length.
+    if value:
+        _update_mpris()
 
 
 # ============================================================
@@ -196,6 +342,9 @@ def toggle_pause():
 
     update_discord(title, paused=player.pause)
 
+    if mpris_service is not None:
+        mpris_service.update_playback_status(_mpris_status())
+
     return player.pause
 
 
@@ -210,11 +359,17 @@ def prev_track():
 def stop_playback():
     player.command("stop")
 
+    if mpris_service is not None:
+        mpris_service.update_playback_status("Stopped")
+
 
 def shutdown():
-    """Release MPV and Discord resources."""
+    """Release MPV, MPRIS and Discord resources."""
 
     disconnect_discord()
+
+    if mpris_service is not None:
+        mpris_service.stop()
 
     try:
         player.terminate()

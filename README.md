@@ -19,6 +19,8 @@ No YouTube API key required — search is powered by `yt-dlp`.
 * **Playback via mpv** — play / pause, next / previous, stop, volume, seek bar.
 * **Discord Rich Presence** — shows `Listening: <song>` with the song's banner.
   Uses **your own** Discord Application ID, entered once and saved locally.
+* **Desktop media integration (MPRIS)** — media keys, "now playing" widgets
+  (e.g. Waybar, GNOME, KDE) and `playerctl` can see and control playback.
 * **Still scriptable** — `Main.py` keeps the original command-line interface.
 
 ---
@@ -67,12 +69,31 @@ No secrets are stored in the source code.
 
 ---
 
+## Desktop media integration / MPRIS (Linux, optional)
+
+On Linux the player exposes a standard **MPRIS** interface, so desktop media
+keys, "now playing" widgets and `playerctl` can see and control playback:
+
+```bash
+playerctl -l            # lists "echoyt"
+playerctl metadata      # title, artist, artwork, length
+playerctl play-pause    # controls EchoYT
+```
+
+This is implemented in pure Python (`mpris.py`) via the `jeepney` library.
+If `jeepney` isn't installed the app still runs normally — the MPRIS
+integration is simply disabled. It is **not** the native `mpv-mpris` plugin:
+loading that into the Qt process crashes, so it is intentionally avoided.
+
+---
+
 ## Project layout
 
 ```
 Main.py        CLI entry point
 newsongs.py    YouTube search (yt-dlp) and adding tracks
-playback.py    mpv player + Discord Rich Presence
+playback.py    mpv player + Discord Rich Presence + MPRIS hookup
+mpris.py       pure-Python MPRIS D-Bus service (Linux desktop integration)
 playlists.py   named playlist storage (create / remove / dedupe)
 settings.py    local user settings (Discord App ID)
 config.py      paths and constants
