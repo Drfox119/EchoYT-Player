@@ -42,9 +42,7 @@ jobs:
       - name: Download libmpv (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          python -m pip install py7zr
-          python packaging/get_libmpv.py .
+        run: python packaging/get_libmpv.py .
 
       - name: Install Python dependencies
         run: |

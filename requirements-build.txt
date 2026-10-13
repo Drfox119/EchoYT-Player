@@ -1,3 +1,2 @@
 -r requirements.txt
 pyinstaller>=6.0
-py7zr>=0.20

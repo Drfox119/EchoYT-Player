@@ -5,21 +5,45 @@ releases and extracts ``libmpv-2.dll`` into the given directory.
 
 Usage:  python packaging/get_libmpv.py [dest_dir]
 
-Only intended for the Windows CI job (requires the ``py7zr`` package).
+A ``7z``/``7za``/``7zr`` executable is required to unpack the archive (the
+``.7z`` uses the BCJ2 filter, which pure-python extractors cannot handle).
+On Windows the 7-Zip bundled with the GitHub runners is picked up
+automatically.
 """
 
-import io
 import json
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import urllib.request
 
 API = "https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest"
 HEADERS = {"User-Agent": "echoyt-build"}
 
+WINDOWS_7Z_PATHS = (
+    r"C:\Program Files\7-Zip\7z.exe",
+    r"C:\Program Files (x86)\7-Zip\7z.exe",
+)
+
 
 def _get(url):
     return urllib.request.urlopen(urllib.request.Request(url, headers=HEADERS))
+
+
+def _find_7z():
+    for exe in ("7z", "7za", "7zr"):
+        path = shutil.which(exe)
+
+        if path:
+            return path
+
+    for path in WINDOWS_7Z_PATHS:
+        if os.path.isfile(path):
+            return path
+
+    return None
 
 
 def main(dest="."):
@@ -44,22 +68,32 @@ def main(dest="."):
     with _get(asset["browser_download_url"]) as resp:
         raw = resp.read()
 
-    import py7zr
+    sevenzip = _find_7z()
 
-    with py7zr.SevenZipFile(io.BytesIO(raw)) as archive:
-        members = [n for n in archive.getnames()
-                   if os.path.basename(n).lower() == "libmpv-2.dll"]
+    if sevenzip is None:
+        sys.exit(
+            "7-Zip (7z) was not found. Install p7zip/7-Zip so the .7z archive "
+            "can be unpacked."
+        )
 
-        if not members:
-            sys.exit("libmpv-2.dll not present in the archive")
+    os.makedirs(dest, exist_ok=True)
 
-        archive.extract(path=dest, targets=members)
+    with tempfile.TemporaryDirectory() as tmp:
+        archive_path = os.path.join(tmp, "mpv.7z")
 
-    extracted = os.path.join(dest, members[0])
+        with open(archive_path, "wb") as fh:
+            fh.write(raw)
+
+        subprocess.run(
+            [sevenzip, "e", "-y", "-o" + os.path.abspath(dest), archive_path,
+             "libmpv-2.dll"],
+            check=True,
+        )
+
     target = os.path.join(dest, "libmpv-2.dll")
 
-    if os.path.abspath(extracted) != os.path.abspath(target):
-        os.replace(extracted, target)
+    if not os.path.isfile(target):
+        sys.exit("libmpv-2.dll was not extracted from the archive")
 
     print("Saved", target)
 
