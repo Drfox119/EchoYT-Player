@@ -30,6 +30,14 @@ if sys.platform.startswith("win"):
             binaries.append((_path, "."))
             break
 
+    # libmpv hard-links the Vulkan loader, so ship it too (see
+    # packaging/get_libmpv.py); without it the engine fails to load on
+    # systems that have no GPU Vulkan driver.
+    _vulkan = os.path.join(project_root, "vulkan-1.dll")
+
+    if os.path.isfile(_vulkan):
+        binaries.append((_vulkan, "."))
+
 hiddenimports = [
     "mpv",
     "pypresence",

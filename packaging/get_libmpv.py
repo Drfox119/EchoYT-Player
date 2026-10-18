@@ -1,16 +1,24 @@
-"""Download a Windows ``libmpv-2.dll`` for bundling into the release build.
+"""Download the Windows runtime bits needed to bundle EchoYT.
 
-Grabs the latest ``mpv-dev-x86_64`` archive from shinchiro's mpv-winbuild-cmake
-releases and extracts ``libmpv-2.dll`` into the given directory.
+Two things live next to this build on Windows:
+
+* ``libmpv-2.dll`` - the playback engine, from shinchiro's
+  mpv-winbuild-cmake releases.
+* ``vulkan-1.dll`` - the Khronos Vulkan loader. mpv hard-links against it
+  (it is a normal load-time import), so the engine cannot load on machines
+  that lack a GPU Vulkan driver, such as many VMs and RDP sessions. We ship
+  the redistributable LunarG runtime loader so playback always starts; mpv
+  only ever *touches* Vulkan for video output, and EchoYT is audio-only.
 
 Usage:  python packaging/get_libmpv.py [dest_dir]
 
-A ``7z``/``7za``/``7zr`` executable is required to unpack the archive (the
-``.7z`` uses the BCJ2 filter, which pure-python extractors cannot handle).
-On Windows the 7-Zip bundled with the GitHub runners is picked up
+An ``7z``/``7za``/``7zr`` executable is required to unpack the mpv ``.7z``
+(the archive uses the BCJ2 filter, which pure-python extractors cannot
+handle). On Windows the 7-Zip bundled with the GitHub runners is picked up
 automatically.
 """
 
+import io
 import json
 import os
 import shutil
@@ -18,9 +26,16 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
+import zipfile
 
 API = "https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest"
 HEADERS = {"User-Agent": "echoyt-build"}
+
+VULKAN_LATEST = "https://vulkan.lunarg.com/sdk/latest/windows.txt"
+VULKAN_RUNTIME = (
+    "https://sdk.lunarg.com/sdk/download/latest/windows/"
+    "VulkanRT-X64-{version}-Components.zip"
+)
 
 WINDOWS_7Z_PATHS = (
     r"C:\Program Files\7-Zip\7z.exe",
@@ -46,7 +61,7 @@ def _find_7z():
     return None
 
 
-def main(dest="."):
+def _fetch_libmpv(dest):
     with _get(API) as resp:
         release = json.load(resp)
 
@@ -76,8 +91,6 @@ def main(dest="."):
             "can be unpacked."
         )
 
-    os.makedirs(dest, exist_ok=True)
-
     with tempfile.TemporaryDirectory() as tmp:
         archive_path = os.path.join(tmp, "mpv.7z")
 
@@ -96,6 +109,40 @@ def main(dest="."):
         sys.exit("libmpv-2.dll was not extracted from the archive")
 
     print("Saved", target)
+
+
+def _fetch_vulkan_loader(dest):
+    with _get(VULKAN_LATEST) as resp:
+        version = resp.read().decode("ascii").strip()
+
+    url = VULKAN_RUNTIME.format(version=version)
+    print("Downloading", url)
+
+    with _get(url) as resp:
+        raw = resp.read()
+
+    target = os.path.join(dest, "vulkan-1.dll")
+
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        members = [
+            name for name in archive.namelist()
+            if name.replace("\\", "/").lower().endswith("/x64/vulkan-1.dll")
+            or name.replace("\\", "/").lower() == "vulkan-1.dll"
+        ]
+
+        if not members:
+            sys.exit("vulkan-1.dll (x64) not found in the Vulkan runtime zip")
+
+        with archive.open(members[0]) as src, open(target, "wb") as out:
+            shutil.copyfileobj(src, out)
+
+    print("Saved", target)
+
+
+def main(dest="."):
+    os.makedirs(dest, exist_ok=True)
+    _fetch_libmpv(dest)
+    _fetch_vulkan_loader(dest)
 
 
 if __name__ == "__main__":
