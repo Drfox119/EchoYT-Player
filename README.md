@@ -3,8 +3,10 @@
 A lightweight **desktop YouTube playlist player** with a modern dark GUI.
 Search YouTube, build multiple playlists, and play them through `mpv` while
 showing what you're listening to on Discord (Rich Presence).
+the search is powered by `yt-dlp`.
 
-No YouTube API key required — search is powered by `yt-dlp`.
+## Project Perview
+<img width="1910" height="1032" alt="EhcoYt" src="https://github.com/user-attachments/assets/5ee5abc7-043f-4b27-9dab-7b4c125249a9" />
 
 ---
 
@@ -26,14 +28,18 @@ No Python installation is needed for the prebuilt builds.
 * **Search YouTube without an API key** — powered by `yt-dlp`.
 * **Multiple playlists** — create, switch, and delete named playlists.
 * **No duplicate tracks** — the same song can't be added to a playlist twice.
-* **Song names, not URLs** — titles are stored and shown; missing ones are
-  resolved automatically in the background.
 * **Playback via mpv** — play / pause, next / previous, stop, volume, seek bar.
 * **Discord Rich Presence** — shows `Listening: <song>` with the song's banner.
   Uses **your own** Discord Application ID, entered once and saved locally.
 * **Desktop media integration (MPRIS)** — media keys, "now playing" widgets
   (e.g. Waybar, GNOME, KDE) and `playerctl` can see and control playback.
-* **Still scriptable** — `Main.py` keeps the original command-line interface.
+* **Different themes you can choose From**
+* Blue: <img width="1912" height="1035" alt="1" src="https://github.com/user-attachments/assets/e7cdbe0a-9e42-44be-8421-8feac5a08029" />
+* light blue: <img width="1919" height="1041" alt="2" src="https://github.com/user-attachments/assets/afee95ff-1728-4556-a158-d509414680be" />
+* cyan: <img width="1919" height="1035" alt="3" src="https://github.com/user-attachments/assets/d3443e0a-e225-4783-99d1-e82fbb44c2c5" />
+* lime: <img width="1918" height="1038" alt="4" src="https://github.com/user-attachments/assets/89bef538-46db-45aa-84d1-bf4f589ecf0e" />
+
+
 
 ---
 
